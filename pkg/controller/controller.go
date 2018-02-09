@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"crypto/md5"
 	"fmt"
 	"time"
 
@@ -26,10 +27,13 @@ import (
 const controllerAgentName = "oidc-ingress-controller"
 
 const (
-	SuccessSynced         = "Synced"
-	ErrResourceExists     = "ErrResourceExists"
-	MessageResourceExists = "Resource %q already exists and is not managed by Foo"
-	MessageResourceSynced = "Foo synced successfully"
+	generatedAnnotation       = "pwillie/generated-by"
+	originNamespaceAnnotation = "pwillie/origin-namespace"
+	originNameAnnotation      = "pwillie/origin-name"
+	SuccessSynced             = "Synced"
+	ErrResourceExists         = "ErrResourceExists"
+	MessageResourceExists     = "Resource %q already exists and is not managed by Foo"
+	MessageResourceSynced     = "Foo synced successfully"
 )
 
 type Controller struct {
@@ -106,6 +110,8 @@ func (c *Controller) Run(threadiness int, stopCh <-chan struct{}) error {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
+	// TODO: verify all auth ingress resources still valid??
+
 	glog.Info("Starting workers")
 
 	for i := 0; i < threadiness; i++ {
@@ -173,6 +179,8 @@ func (c *Controller) syncHandler(key string) error {
 
 		if apierrors.IsNotFound(err) {
 			runtime.HandleError(fmt.Errorf("ingress '%s' in work queue no longer exists", key))
+			// ensure we don't have any dangling ingress resources
+			c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Delete(authIngressName(namespace, name), nil)
 			return nil
 		}
 
@@ -185,18 +193,22 @@ func (c *Controller) syncHandler(key string) error {
 		// set nginx auth annotations
 		glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " " + c.oidcClientAnnotation + ": " + ingress.Annotations[c.oidcClientAnnotation])
 		ingressCopy := ingress.DeepCopy()
-		ingressCopy.Annotations["ingress.kubernetes.io/auth-signin"] = "$scheme://$host/auth/signin?client=" + ingress.Annotations[c.oidcClientAnnotation]
-		ingressCopy.Annotations["ingress.kubernetes.io/auth-url"] = fmt.Sprintf(
-			"http://%s.%s.svc.cluster.local:%d/auth/verify?client=%s",
-			c.oidcAuthServiceName,
-			c.oidcAuthNamespace,
-			c.oidcAuthServicePort,
-			ingress.Annotations[c.oidcClientAnnotation],
-		)
+		// found that different versions of nginx ingress controller are using different annotation names
+		for _, domain := range []string{"ingress.kubernetes.io", "nginx.ingress.kubernetes.io"} {
+			ingressCopy.Annotations[domain+"/auth-signin"] = "/auth/signin?client=" + ingress.Annotations[c.oidcClientAnnotation]
+			ingressCopy.Annotations[domain+"/auth-url"] = fmt.Sprintf(
+				"http://%s.%s.svc.cluster.local:%d/auth/verify?client=%s",
+				c.oidcAuthServiceName,
+				c.oidcAuthNamespace,
+				c.oidcAuthServicePort,
+				ingress.Annotations[c.oidcClientAnnotation],
+			)
+		}
 		_, err = c.kubeclientset.ExtensionsV1beta1().Ingresses(ingress.Namespace).Update(ingressCopy)
 		return err
-
 	}
+	// ensure we don't have any dangling ingress resources
+	c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Delete(authIngressName(namespace, name), nil)
 	return nil
 }
 
@@ -233,8 +245,8 @@ func (c *Controller) handleObject(obj interface{}) {
 }
 
 func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
-	authIngressName := ingress.GetName() + "-auth"
-	authIngress, err := c.ingressLister.Ingresses(c.oidcAuthNamespace).Get(authIngressName)
+	aname := authIngressName(ingress.GetNamespace(), ingress.GetName())
+	authIngress, err := c.ingressLister.Ingresses(c.oidcAuthNamespace).Get(aname)
 
 	createIngress := false
 	if err != nil {
@@ -243,21 +255,23 @@ func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
 			authIngress = &extensions.Ingress{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: c.oidcAuthNamespace,
-					Name:      authIngressName,
+					Name:      aname,
 				},
 				Spec: extensions.IngressSpec{
 				// Rules: make([]extensions.IngressRule, 0, len(ingress.Spec.Rules)),
 				},
 			}
 			authIngress.Annotations = map[string]string{}
-			authIngress.Annotations["pwillie/generated-by"] = controllerAgentName
+			authIngress.Annotations[generatedAnnotation] = controllerAgentName
+			authIngress.Annotations[originNamespaceAnnotation] = ingress.GetNamespace()
+			authIngress.Annotations[originNameAnnotation] = ingress.GetName()
 		} else {
-			return errors.Wrapf(err, "could not check for existing ingress %s/%s", c.oidcAuthNamespace, authIngressName)
+			return errors.Wrapf(err, "could not check for existing ingress %s/%s", c.oidcAuthNamespace, aname)
 		}
 	}
 
 	// only modify ingress if we created it ie. has our annotation
-	if authIngress.Annotations["pwillie/generated-by"] == controllerAgentName {
+	if authIngress.Annotations[generatedAnnotation] == controllerAgentName {
 		authIngress.Spec.Rules = make([]extensions.IngressRule, 0, len(ingress.Spec.Rules))
 		for _, rule := range ingress.Spec.Rules {
 			glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " Host: " + rule.Host)
@@ -280,9 +294,6 @@ func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
 		}
 	}
 
-	// glog.Debugf("\nIngress: %#v\n", ingress)
-	// glog.Debugf("\nAuth Ingress: %#v\n", authIngress)
-
 	if createIngress {
 		_, err = c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Create(authIngress)
 		glog.Infof("Create ingress: %+v\n", err)
@@ -291,4 +302,8 @@ func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
 	_, err = c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Update(authIngress)
 	glog.Infof("Update ingress: %+v\n", err)
 	return err
+}
+
+func authIngressName(namespace, name string) string {
+	return fmt.Sprintf("%s", md5.Sum([]byte(namespace+"/"+name)))
 }

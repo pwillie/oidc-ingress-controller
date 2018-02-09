@@ -21,6 +21,7 @@ var (
 	clientAuthNamespace   string
 	clientAuthService     string
 	clientAuthServicePort int
+	versionFlag           bool
 )
 
 func init() {
@@ -30,10 +31,16 @@ func init() {
 	flag.StringVar(&clientAuthNamespace, "authns", "my-namespace", "Internal auth service namespace")
 	flag.StringVar(&clientAuthService, "authsvc", "my-svc", "Internal auth service service name")
 	flag.IntVar(&clientAuthServicePort, "authport", 80, "Internal auth service service port")
+	flag.BoolVar(&versionFlag, "version", false, "Version")
 }
 
 func main() {
 	flag.Parse()
+
+	if versionFlag {
+		PrintVersion()
+		return
+	}
 
 	cfg, err := clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
 	if err != nil {
