@@ -27,6 +27,7 @@ import (
 const controllerAgentName = "oidc-ingress-controller"
 
 const (
+	classAnnotation           = "kubernetes.io/ingress.class"
 	generatedAnnotation       = "pwillie/generated-by"
 	originNamespaceAnnotation = "pwillie/origin-namespace"
 	originNameAnnotation      = "pwillie/origin-name"
@@ -176,14 +177,12 @@ func (c *Controller) syncHandler(key string) error {
 
 	ingress, err := c.ingressLister.Ingresses(namespace).Get(name)
 	if err != nil {
-
 		if apierrors.IsNotFound(err) {
 			runtime.HandleError(fmt.Errorf("ingress '%s' in work queue no longer exists", key))
 			// ensure we don't have any dangling ingress resources
 			c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Delete(authIngressName(namespace, name), nil)
 			return nil
 		}
-
 		return err
 	}
 
@@ -195,8 +194,10 @@ func (c *Controller) syncHandler(key string) error {
 		return c.addAuthAnnotations(ingress)
 	}
 	// ensure we don't have any dangling ingress resources
-	c.deleteAuthAnnotations(ingress)
 	c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Delete(authIngressName(namespace, name), nil)
+	if val, ok := ingress.Annotations[generatedAnnotation]; ok && val == controllerAgentName {
+		c.deleteAuthAnnotations(ingress)
+	}
 	return nil
 }
 
@@ -232,20 +233,31 @@ func (c *Controller) handleObject(obj interface{}) {
 
 }
 
-func (c *Controller) addAuthAnnotations(ingress *extensions.Ingress) error {
-	// set nginx auth annotations
-	glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " " + c.oidcClientAnnotation + ": " + ingress.Annotations[c.oidcClientAnnotation])
-	ingressCopy := ingress.DeepCopy()
+func (c *Controller) makeAuthAnnotations(ingress *extensions.Ingress) map[string]string {
+	// generate nginx auth annotations
+	annotations := map[string]string{}
+	annotations[generatedAnnotation] = controllerAgentName
+
 	// found that different versions of nginx ingress controller are using different annotation names
 	for _, domain := range []string{"ingress.kubernetes.io", "nginx.ingress.kubernetes.io"} {
-		ingressCopy.Annotations[domain+"/auth-signin"] = "/auth/signin?client=" + ingress.Annotations[c.oidcClientAnnotation]
-		ingressCopy.Annotations[domain+"/auth-url"] = fmt.Sprintf(
-			"http://%s.%s.svc.cluster.local:%d/auth/verify?client=%s",
+		annotations[domain+"/auth-signin"] = "/auth/signin/" + ingress.Annotations[c.oidcClientAnnotation]
+		annotations[domain+"/auth-url"] = fmt.Sprintf(
+			"http://%s.%s.svc.cluster.local:%d/auth/verify/%s",
 			c.oidcAuthServiceName,
 			c.oidcAuthNamespace,
 			c.oidcAuthServicePort,
 			ingress.Annotations[c.oidcClientAnnotation],
 		)
+	}
+	return annotations
+}
+
+func (c *Controller) addAuthAnnotations(ingress *extensions.Ingress) error {
+	// add nginx auth annotations
+	glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " " + c.oidcClientAnnotation + ": " + ingress.Annotations[c.oidcClientAnnotation])
+	ingressCopy := ingress.DeepCopy()
+	for key, val := range c.makeAuthAnnotations(ingress) {
+		ingressCopy.Annotations[key] = val
 	}
 	_, err := c.kubeclientset.ExtensionsV1beta1().Ingresses(ingress.Namespace).Update(ingressCopy)
 	return err
@@ -258,21 +270,17 @@ func (c *Controller) deleteAuthAnnotations(ingress *extensions.Ingress) error {
 		return nil
 	}
 	ingressCopy := ingress.DeepCopy()
-	delete(ingressCopy.Annotations, generatedAnnotation)
-	delete(ingressCopy.Annotations, originNamespaceAnnotation)
-	delete(ingressCopy.Annotations, originNameAnnotation)
-	// found that different versions of nginx ingress controller are using different annotation names
-	for _, domain := range []string{"ingress.kubernetes.io", "nginx.ingress.kubernetes.io"} {
-		delete(ingressCopy.Annotations, domain+"/auth-signin")
-		delete(ingressCopy.Annotations, domain+"/auth-url")
+	for key := range c.makeAuthAnnotations(ingress) {
+		delete(ingressCopy.Annotations, key)
 	}
 	_, err := c.kubeclientset.ExtensionsV1beta1().Ingresses(ingress.Namespace).Update(ingressCopy)
 	return err
 }
 
 func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
+	var authIngress *extensions.Ingress
 	aname := authIngressName(ingress.GetNamespace(), ingress.GetName())
-	authIngress, err := c.ingressLister.Ingresses(c.oidcAuthNamespace).Get(aname)
+	ing, err := c.ingressLister.Ingresses(c.oidcAuthNamespace).Get(aname)
 
 	createIngress := false
 	if err != nil {
@@ -283,17 +291,20 @@ func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
 					Namespace: c.oidcAuthNamespace,
 					Name:      aname,
 				},
-				Spec: extensions.IngressSpec{
-				// Rules: make([]extensions.IngressRule, 0, len(ingress.Spec.Rules)),
-				},
+				Spec: extensions.IngressSpec{},
 			}
 			authIngress.Annotations = map[string]string{}
 			authIngress.Annotations[generatedAnnotation] = controllerAgentName
 			authIngress.Annotations[originNamespaceAnnotation] = ingress.GetNamespace()
 			authIngress.Annotations[originNameAnnotation] = ingress.GetName()
+			if class, ok := ingress.Annotations[classAnnotation]; ok {
+				authIngress.Annotations[classAnnotation] = class
+			}
 		} else {
 			return errors.Wrapf(err, "could not check for existing ingress %s/%s", c.oidcAuthNamespace, aname)
 		}
+	} else {
+		authIngress = ing.DeepCopy()
 	}
 
 	// only modify ingress if we created it ie. has our annotation
