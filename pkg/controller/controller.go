@@ -188,26 +188,14 @@ func (c *Controller) syncHandler(key string) error {
 	}
 
 	if _, ok := ingress.Annotations[c.oidcClientAnnotation]; ok {
-		c.createAuthIngress(ingress)
-
-		// set nginx auth annotations
-		glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " " + c.oidcClientAnnotation + ": " + ingress.Annotations[c.oidcClientAnnotation])
-		ingressCopy := ingress.DeepCopy()
-		// found that different versions of nginx ingress controller are using different annotation names
-		for _, domain := range []string{"ingress.kubernetes.io", "nginx.ingress.kubernetes.io"} {
-			ingressCopy.Annotations[domain+"/auth-signin"] = "/auth/signin?client=" + ingress.Annotations[c.oidcClientAnnotation]
-			ingressCopy.Annotations[domain+"/auth-url"] = fmt.Sprintf(
-				"http://%s.%s.svc.cluster.local:%d/auth/verify?client=%s",
-				c.oidcAuthServiceName,
-				c.oidcAuthNamespace,
-				c.oidcAuthServicePort,
-				ingress.Annotations[c.oidcClientAnnotation],
-			)
+		err = c.createAuthIngress(ingress)
+		if err != nil {
+			return err
 		}
-		_, err = c.kubeclientset.ExtensionsV1beta1().Ingresses(ingress.Namespace).Update(ingressCopy)
-		return err
+		return c.addAuthAnnotations(ingress)
 	}
 	// ensure we don't have any dangling ingress resources
+	c.deleteAuthAnnotations(ingress)
 	c.kubeclientset.ExtensionsV1beta1().Ingresses(c.oidcAuthNamespace).Delete(authIngressName(namespace, name), nil)
 	return nil
 }
@@ -242,6 +230,44 @@ func (c *Controller) handleObject(obj interface{}) {
 	c.enqueueIngress(object)
 	return
 
+}
+
+func (c *Controller) addAuthAnnotations(ingress *extensions.Ingress) error {
+	// set nginx auth annotations
+	glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " " + c.oidcClientAnnotation + ": " + ingress.Annotations[c.oidcClientAnnotation])
+	ingressCopy := ingress.DeepCopy()
+	// found that different versions of nginx ingress controller are using different annotation names
+	for _, domain := range []string{"ingress.kubernetes.io", "nginx.ingress.kubernetes.io"} {
+		ingressCopy.Annotations[domain+"/auth-signin"] = "/auth/signin?client=" + ingress.Annotations[c.oidcClientAnnotation]
+		ingressCopy.Annotations[domain+"/auth-url"] = fmt.Sprintf(
+			"http://%s.%s.svc.cluster.local:%d/auth/verify?client=%s",
+			c.oidcAuthServiceName,
+			c.oidcAuthNamespace,
+			c.oidcAuthServicePort,
+			ingress.Annotations[c.oidcClientAnnotation],
+		)
+	}
+	_, err := c.kubeclientset.ExtensionsV1beta1().Ingresses(ingress.Namespace).Update(ingressCopy)
+	return err
+}
+
+func (c *Controller) deleteAuthAnnotations(ingress *extensions.Ingress) error {
+	// remove nginx auth annotations
+	glog.Infof("Ingress " + ingress.Name + "/" + ingress.Namespace + " " + c.oidcClientAnnotation + ": " + ingress.Annotations[c.oidcClientAnnotation])
+	if val, ok := ingress.Annotations[generatedAnnotation]; ok && val != controllerAgentName {
+		return nil
+	}
+	ingressCopy := ingress.DeepCopy()
+	delete(ingressCopy.Annotations, generatedAnnotation)
+	delete(ingressCopy.Annotations, originNamespaceAnnotation)
+	delete(ingressCopy.Annotations, originNameAnnotation)
+	// found that different versions of nginx ingress controller are using different annotation names
+	for _, domain := range []string{"ingress.kubernetes.io", "nginx.ingress.kubernetes.io"} {
+		delete(ingressCopy.Annotations, domain+"/auth-signin")
+		delete(ingressCopy.Annotations, domain+"/auth-url")
+	}
+	_, err := c.kubeclientset.ExtensionsV1beta1().Ingresses(ingress.Namespace).Update(ingressCopy)
+	return err
 }
 
 func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
