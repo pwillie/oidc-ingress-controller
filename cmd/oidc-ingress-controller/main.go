@@ -27,7 +27,7 @@ var (
 func init() {
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
 	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig. Only required if out-of-cluster.")
-	flag.StringVar(&clientIDAnnotation, "clientannotation", "pwilson.cc/client", "The Ingress Annotation name that holds the OIDC Client ID")
+	flag.StringVar(&clientIDAnnotation, "clientannotation", "pwillie/oidc-client", "The Ingress Annotation name that holds the OIDC Client ID")
 	flag.StringVar(&clientAuthNamespace, "authns", "my-namespace", "Internal auth service namespace")
 	flag.StringVar(&clientAuthService, "authsvc", "my-svc", "Internal auth service service name")
 	flag.IntVar(&clientAuthServicePort, "authport", 80, "Internal auth service service port")
@@ -37,8 +37,8 @@ func init() {
 func main() {
 	flag.Parse()
 
+	PrintVersion()
 	if versionFlag {
-		PrintVersion()
 		return
 	}
 

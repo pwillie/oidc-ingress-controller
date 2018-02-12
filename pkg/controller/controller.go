@@ -305,5 +305,5 @@ func (c *Controller) createAuthIngress(ingress *extensions.Ingress) error {
 }
 
 func authIngressName(namespace, name string) string {
-	return fmt.Sprintf("%s", md5.Sum([]byte(namespace+"/"+name)))
+	return fmt.Sprintf("%x", md5.Sum([]byte(namespace+"/"+name)))
 }
